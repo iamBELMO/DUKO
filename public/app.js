@@ -3,7 +3,9 @@ import { createSoundManager } from './sounds.js';
 import { captureCards, animateCards, animateResults, animateTab, clearEffects, pressFeedback, rejectInput, reducedMotion } from './effects.js';
 import { HostedConnection } from './connection.js';
 import { makeCardSource, cardSourceValid, planCardDrop } from './card-gestures.js';
+import { createApiClient } from './api-client.js';
 const clientId=crypto.randomUUID();
+const apiClient=createApiClient({clientId,pageUrl:location.href,apiOrigin:document.querySelector('meta[name="duko-api-origin"]')?.content||''});
 const $ = s => document.querySelector(s);
 const escape = s => String(s ?? '').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const suits = {hearts:'♥',diamonds:'♦',clubs:'♣',spades:'♠'};
@@ -45,7 +47,7 @@ function remembered(key, fallback='') {try{return localStorage.getItem(key)??fal
 const ui = {
   profile:null,view:null,name:remembered('duko-name'),code:new URLSearchParams(location.search).get('room')||'',
   tab:new URLSearchParams(location.search).has('room')?'join':'create',busy:false,wsUp:false,connecting:false,
-  mode:null,selected:null,modal:null,dismissedRound:null,offset:0,ping:null,shareOrigin:location.origin,
+  mode:null,selected:null,modal:null,dismissedRound:null,offset:0,ping:null,
   sound:remembered('duko-sound')==='on',replaced:false,changed:new Set(),deal:false,offline:false,burnSelection:null,paintedView:null,paintedRevision:null,paintedPage:null,paintedHtml:null,modalKey:null,modalContent:null,copiedUntil:0
 };
 let ws=null,retryTimer=null,retryDelay=700,toastTimer=null,installPrompt=null;
@@ -61,8 +63,7 @@ function toast(message,error=false){
 const sounds=createSoundManager(()=>ui.sound);
 function tone(kind='tap'){sounds.play(({tap:'click',burn:'fire',error:'lose'})[kind]||kind,{haptic:['burn','win'].includes(kind)&&!reducedMotion()});}
 async function api(path,body){
-  const response=await fetch(path,{method:body===undefined?'GET':'POST',credentials:'same-origin',headers:{'X-Duko-Client':clientId,...(body===undefined?{}:{'Content-Type':'application/json'})},signal:AbortSignal.timeout(10000),body:body===undefined?undefined:JSON.stringify(body),cache:'no-store'});
-  const data=await response.json();
+  const {response,data}=await apiClient.request(path,body);
   if(!response.ok)throw Object.assign(new Error(errors[data.code]||'تعذر الاتصال. جرّب مرة ثانية.'),{code:data.code,status:response.status});
   return data;
 }
@@ -346,7 +347,7 @@ async function enter(kind){
     const room=await api(kind==='join'?'/api/rooms/join':'/api/rooms/create',kind==='join'?{code:ui.code}:{});
     ui.profile={...session,roomCode:room.code};
     if(kind==='practice'){await api('/api/rooms/bot',{});await api('/api/rooms/bot',{});}
-    ui.code=room.code;history.replaceState(null,'','/?room='+room.code);
+    ui.code=room.code;history.replaceState(null,'',apiClient.roomURL(room.code));
     connect();
   }catch(error){failed=true;toast(error.message,true);}finally{ui.busy=false;render();if(failed&&kind==='join'){$('#room-code')?.focus();rejectInput($('.code-entry'));}}
 }
@@ -501,10 +502,9 @@ document.addEventListener('click',async event=>{
     else if(action==='confirm-leave'){
       await api('/api/rooms/leave',{});clearTimeout(retryTimer);if(ws){ws.onclose=null;ws.close();}ws=null;
       for(const p of pending.values()){clearTimeout(p.timer);p.resolve(false);}pending.clear();
-      ui.view=null;ui.profile.roomCode=null;ui.wsUp=false;ui.modal=null;ui.mode=null;history.replaceState(null,'','/');render();
+      ui.view=null;ui.profile.roomCode=null;ui.wsUp=false;ui.modal=null;ui.mode=null;history.replaceState(null,'',apiClient.baseURL);render();
     }else if(action==='invite'){
-      const info=await api('/api/me');ui.shareOrigin=location.origin;
-      const url=ui.shareOrigin+'/?room='+ui.view.roomCode;
+      const url=apiClient.roomURL(ui.view.roomCode);
       if(navigator.clipboard&&window.isSecureContext){await navigator.clipboard.writeText(url);ui.copiedUntil=Date.now()+2200;toast('انسخنا الرابط. ابعته للشلّة!');setTimeout(()=>{if(ui.view)render();},2300);}
       else window.prompt('انسخ رابط الدعوة وابعته للشلّة:',url);
     }else if(action==='install'){
@@ -527,10 +527,10 @@ setInterval(updateTimers,100);
 setInterval(()=>{if(ui.wsUp)ws.send(JSON.stringify({type:'ping',clientTime:Date.now()}));},12000);
 window.addEventListener('online',()=>{if(ui.profile?.roomCode&&!ui.wsUp)connect();});
 async function boot(){
-  try{const data=await api('/api/me');ui.profile=data.session;ui.shareOrigin=data.shareOrigin;ui.offline=false;
+  try{const data=await api('/api/me');ui.profile=data.session;ui.offline=false;
     if(ui.profile){ui.name=ui.profile.name;if(ui.profile.roomCode)connect();}
   }catch{ui.offline=true;}
   render();
-  if('serviceWorker'in navigator&&window.isSecureContext)navigator.serviceWorker.register('/sw.js').catch(()=>{});
+  if('serviceWorker'in navigator&&window.isSecureContext)navigator.serviceWorker.register(document.querySelector('meta[name="duko-service-worker"]')?.content||new URL('sw.js',apiClient.baseURL).href).catch(()=>{});
 }
 boot();

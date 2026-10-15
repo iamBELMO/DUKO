@@ -6,6 +6,7 @@ import { readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { cardFace, suitSvg, suitNames } from '../public/card-art.js';
 import { makeCardSource, cardSourceValid, planCardDrop } from '../public/card-gestures.js';
+import { createApiClient } from '../public/api-client.js';
 import { makeDeck } from '../src/cards.ts';
 import { createRoom, reduceCommand, advanceTime, assertInvariants } from '../src/engine.ts';
 import { RoomActor } from '../src/room-actor.ts';
@@ -27,7 +28,7 @@ function app(room){
   const clicks=[],commands=[];
   const root={innerHTML:'',querySelector:()=>null,querySelectorAll:()=>[],focus(){}};
   const document={addEventListener(type,handler){if(type==='click')clicks.push(handler);},querySelector:()=>root,querySelectorAll:()=>[],hidden:false};
-  const context=vm.createContext({crypto:{randomUUID},URLSearchParams,location:{search:'',origin:'https://duko.test'},localStorage:{getItem:()=>null},document,window:{addEventListener(){}},setInterval(){},setTimeout(){},clearTimeout(){},Date:class extends Date{static now(){return NOW;}},WebSocket:{OPEN:1},cardFace,suitSvg,suitNames,makeCardSource,cardSourceValid,planCardDrop,createSoundManager:()=>({play(){},unlock(){}}),reducedMotion:()=>true,pressFeedback(){},captureCards:()=>new Map(),clearEffects(){},animateCards(){},animateTab(){},animateResults(){},rejectInput(){},HostedConnection:class{},navigator:{},history:{replaceState(){}},apiSend:async(type,fields={})=>{
+  const context=vm.createContext({crypto:{randomUUID},URL,URLSearchParams,createApiClient,location:{href:'https://duko.test/',search:'',origin:'https://duko.test'},localStorage:{getItem:()=>null},document,window:{addEventListener(){}},setInterval(){},setTimeout(){},clearTimeout(){},Date:class extends Date{static now(){return NOW;}},WebSocket:{OPEN:1},cardFace,suitSvg,suitNames,makeCardSource,cardSourceValid,planCardDrop,createSoundManager:()=>({play(){},unlock(){}}),reducedMotion:()=>true,pressFeedback(){},captureCards:()=>new Map(),clearEffects(){},animateCards(){},animateTab(){},animateResults(){},rejectInput(){},HostedConnection:class{},navigator:{},history:{replaceState(){}},apiSend:async(type,fields={})=>{
     const view=room.view('p0',NOW),receipt=room.dispatch('p0',{commandId:randomUUID(),roundId:view.roundId,command:{type,actionId:view.private.actionId,...fields}},NOW);
     commands.push({type,fields,receipt});context.inspect.ui.view=room.view('p0',NOW);return receipt.ok;
   }});

@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta name="duko-version" content="0.5.1">
+  <meta name="duko-api-origin" content="https://duko-club-belmo.max083522.chatgpt.site">
+  <meta name="duko-service-worker" content="./pages-sw.js">
+  <meta name="referrer" content="strict-origin-when-cross-origin">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://duko-club-belmo.max083522.chatgpt.site; font-src 'self'; base-uri 'self'; form-action 'self'; object-src 'none'">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#f3f6fc">
+  <meta name="description" content="دوكو — طاولة واحدة تجمع الشلّة. احفظ ورقك، العب الكرامات، واسبقهم بالحرق.">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>دوكو · DUKO</title>
+  <link rel="icon" href="./public/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="./public/icon-192.png">
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="stylesheet" href="./public/styles.css">
+  <script type="module" src="./public/app.js"></script>
+</head>
+<body>
+  <div class="ambient ambient-one"></div><div class="ambient ambient-two"></div>
+  <div id="app"><div class="loading"><span class="loading-suit">♠</span><h1>دوكو</h1><p>بنجهّز الطاولة…</p></div></div>
+  <div id="modal-root"></div>
+  <div id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

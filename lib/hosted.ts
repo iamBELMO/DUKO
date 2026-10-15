@@ -26,6 +26,8 @@ interface StoredRoom {
 interface RoomRow { code: string; payload: string; version: number; updated_at: number }
 const DAY = 86_400_000;
 const COOKIE = 'duko_session';
+const PAGES_ORIGIN = 'https://iambelmo.github.io';
+const isPagesRequest = (request: Request) => request.headers.get('origin') === PAGES_ORIGIN;
 const BOT_NAMES = ['ليان', 'عمر', 'نور', 'سيف', 'جود'];
 const digest = (value: string) => createHash('sha256').update(value).digest('hex');
 const failure = (code: string, status = 400) => Object.assign(new Error(code), { code, status });
@@ -117,7 +119,11 @@ async function rate(db: Database, key: string, maximum: number, now: number, win
   if (row && row.count > maximum) throw failure('RATE_LIMITED', 429);
 }
 async function sessionFor(request: Request, db: Database, time: number, required = true) {
-  const token = (request.headers.get('cookie') || '').split(';').map(s => s.trim()).find(s => s.startsWith(COOKIE + '='))?.slice(COOKIE.length + 1);
+  // Pages uses its own tab session, independent of third-party cookie policies.
+  // Never accept the hosted site's cookie as authentication for a Pages request.
+  const token = isPagesRequest(request)
+    ? /^Bearer ([A-Za-z0-9_-]{43})$/.exec(request.headers.get('authorization') || '')?.[1]
+    : (request.headers.get('cookie') || '').split(';').map(s => s.trim()).find(s => s.startsWith(COOKIE + '='))?.slice(COOKIE.length + 1);
   const session = token && token.length < 150 ? await db.prepare('SELECT * FROM duko_sessions WHERE token_hash=? AND expires_at>?').bind(digest(token), time).first<Session>() : null;
   if (!session && required) throw failure('SESSION_EXPIRED', 401);
   return session || null;
@@ -159,16 +165,40 @@ function code() {
 }
 
 export async function handleApi(request: Request, db: Database, nowFn: () => number = Date.now): Promise<Response> {
+  const origin = request.headers.get('origin'), ownOrigin = new URL(request.url).origin;
+  if (origin && origin !== ownOrigin && origin !== PAGES_ORIGIN) return response({ ok: false, code: 'BAD_ORIGIN' }, 403);
+  if (request.method === 'OPTIONS') {
+    const method = request.headers.get('access-control-request-method');
+    const headers = (request.headers.get('access-control-request-headers') || '').toLowerCase().split(',').map(s => s.trim()).filter(Boolean);
+    if (!isPagesRequest(request) || !['GET', 'POST'].includes(method || '') || headers.some(h => !['authorization', 'content-type', 'x-duko-client'].includes(h))) {
+      return response({ ok: false, code: 'BAD_ORIGIN' }, 403);
+    }
+    return new Response(null, { status: 204, headers: {
+      'Access-Control-Allow-Origin': PAGES_ORIGIN, 'Vary': 'Origin',
+      'Access-Control-Allow-Methods': 'GET, POST',
+      'Access-Control-Allow-Headers': 'Authorization, Content-Type, X-Duko-Client',
+      'Access-Control-Max-Age': '600',
+    } });
+  }
+  const result = await handleApiRequest(request, db, nowFn);
+  if (isPagesRequest(request)) {
+    result.headers.set('Access-Control-Allow-Origin', PAGES_ORIGIN);
+    result.headers.set('Vary', 'Origin');
+  }
+  return result;
+}
+
+async function handleApiRequest(request: Request, db: Database, nowFn: () => number): Promise<Response> {
   try {
     if (!db) throw failure('SERVER_UNAVAILABLE', 503);
     const url = new URL(request.url), time = nowFn(), path = url.pathname, method = request.method;
     if (method === 'GET' && path === '/api/health') {
       await db.prepare('SELECT 1 AS ok').first();
-      return response({ ok: true, version: '0.5.0', hosted: true });
+      return response({ ok: true, version: '0.5.1', hosted: true });
     }
     let payload: Record<string, unknown> = {};
     if (method === 'POST') {
-      if (request.headers.get('origin') !== url.origin) throw failure('BAD_ORIGIN', 403);
+      if (request.headers.get('origin') !== url.origin && !isPagesRequest(request)) throw failure('BAD_ORIGIN', 403);
       if (!request.headers.get('content-type')?.startsWith('application/json')) throw failure('BAD_REQUEST', 415);
       if (Number(request.headers.get('content-length') || 0) > 8192) throw failure('BAD_REQUEST', 413);
       const raw = await request.text();
@@ -195,6 +225,7 @@ export async function handleApi(request: Request, db: Database, nowFn: () => num
       await db.prepare('DELETE FROM duko_sessions WHERE token_hash IN(SELECT token_hash FROM duko_sessions WHERE expires_at<? LIMIT 100)').bind(time).run();
       await db.prepare('DELETE FROM duko_rooms WHERE code IN(SELECT code FROM duko_rooms WHERE updated_at<? LIMIT 50)').bind(time - 7 * DAY).run();
       await db.prepare('DELETE FROM duko_rates WHERE key IN(SELECT key FROM duko_rates WHERE expires_at<? LIMIT 100)').bind(time - DAY).run();
+      if (isPagesRequest(request)) return response({ ok: true, playerId: id, name, sessionToken: token });
       return response({ ok: true, playerId: id, name }, 200, {
         'Set-Cookie': COOKIE + '=' + token + '; HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000' + (url.protocol === 'https:' ? '; Secure' : ''),
       });

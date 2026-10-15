@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { handleApi } from '../lib/hosted.ts';
 import { makeDeck } from '../src/cards.ts';
 import { assertInvariants } from '../src/engine.ts';
+import { createApiClient } from '../public/api-client.js';
 
 function setup(){
   const sqlite=new DatabaseSync(':memory:');
@@ -24,7 +25,7 @@ function setup(){
       headers:{...(body===undefined?{}:{Origin:origin,'Content-Type':'application/json'}),...(person?{Cookie:person.cookie,'X-Duko-Client':person.client}:{}),...extra},
       body:body===undefined?undefined:JSON.stringify(body),
     }),db,()=>now);
-    return {status:result.status,data:await result.json(),cookie:result.headers.get('set-cookie')?.split(';')[0]};
+    return {status:result.status,data:await result.json(),cookie:result.headers.get('set-cookie')?.split(';')[0],headers:result.headers};
   }
   async function person(name){
     const result=await request('/api/session',{name});assert.equal(result.status,200);
@@ -147,12 +148,86 @@ test('host transfer, room isolation, and bot memory survive separate requests',a
     await b.refresh();assert.equal(b.view.hostId,b.id);assert.equal(outsider.view.players.length,1);
     assert.equal((await b.post('/api/rooms/bot')).status,200);await b.refresh();assert.equal(b.view.players.filter(p=>p.bot).length,1);
     await a.send('READY',{ready:true});await b.send('READY',{ready:true});await b.send('START');
-    // Poll the server clock with entirely new actors each request; bots retain their memory.
-    for(let i=0;i<25;i++){app.advance(500);await a.refresh();await b.refresh();}
+    // Check durable observations during the initial peek. After normal play
+    // begins, burning or swapping can legitimately remove remembered cards.
+    for(let i=0;i<8;i++){app.advance(500);await a.refresh();await b.refresh();}
     const saved=JSON.parse(app.sqlite.prepare('SELECT payload FROM duko_rooms WHERE code=?').get(code).payload);
     assert.ok(saved.botMemory.length>0);assert.ok(saved.botMemory[0][1].cards.length>=2);
     assert.equal('botMemory'in b.view,false);
     const malformed=await b.post('/api/command',{envelope:null});assert.equal(malformed.status,400);
     assert.equal((await a.post('/api/rooms/leave')).status,200);
+  }finally{app.close();}
+});
+
+test('Pages preflight accepts only the exact origin, game methods and required headers',async()=>{
+  const app=setup();try{
+    const preflight=async(origin,method='POST',headers='authorization,content-type,x-duko-client')=>handleApi(new Request('https://duko.test/api/session',{method:'OPTIONS',headers:{Origin:origin,'Access-Control-Request-Method':method,'Access-Control-Request-Headers':headers}}),app.db,app.time);
+    const result=await preflight('https://iambelmo.github.io');
+    assert.equal(result.status,204);assert.equal(result.headers.get('Access-Control-Allow-Origin'),'https://iambelmo.github.io');
+    assert.equal(result.headers.has('Access-Control-Allow-Credentials'),false);
+    for(const origin of ['https://evil.test','https://iambelmo.github.io.evil.test','null','http://iambelmo.github.io'])assert.equal((await preflight(origin)).status,403);
+    assert.equal((await preflight('https://iambelmo.github.io','DELETE')).status,403);
+    assert.equal((await preflight('https://iambelmo.github.io','POST','x-unexpected')).status,403);
+    const error=await app.request('/api/rooms/create',{},null,{Origin:'https://iambelmo.github.io'});
+    assert.equal(error.status,401);assert.equal(error.headers.get('Access-Control-Allow-Origin'),'https://iambelmo.github.io');
+  }finally{app.close();}
+});
+
+test('Pages cannot borrow hosted cookies or disclose sessions to another origin',async()=>{
+  const app=setup();try{
+    const hosted=await app.person('hosted');
+    const pagesHeaders={Origin:'https://iambelmo.github.io'};
+    const own=await app.request('/api/me',undefined,hosted,pagesHeaders);
+    assert.equal(own.data.session,null);
+    const created=await app.request('/api/session',{name:'pages'},hosted,pagesHeaders);
+    assert.notEqual(created.data.playerId,hosted.id);assert.equal(created.cookie,undefined);
+    assert.match(created.data.sessionToken,/^[A-Za-z0-9_-]{43}$/);
+    const auth={...pagesHeaders,Authorization:'Bearer '+created.data.sessionToken};
+    const resumed=await app.request('/api/me',undefined,null,auth);
+    assert.equal(resumed.data.session.playerId,created.data.playerId);assert.equal('sessionToken'in resumed.data,false);
+    const foreign=await app.request('/api/me',undefined,hosted,{Origin:'https://evil.test'});
+    assert.equal(foreign.status,403);assert.equal(foreign.headers.has('Access-Control-Allow-Origin'),false);
+    const hashed=app.sqlite.prepare('SELECT token_hash FROM duko_sessions WHERE player_id=?').get(created.data.playerId).token_hash;
+    assert.notEqual(hashed,created.data.sessionToken);assert.match(hashed,/^[a-f0-9]{64}$/);
+    const sameOrigin=await app.request('/api/session',{name:'ordinary'});
+    assert.ok(sameOrigin.cookie);assert.equal('sessionToken'in sameOrigin.data,false);
+    const missingOrigin=await app.request('/api/session',{name:'no origin'},null,{Origin:''});assert.equal(missingOrigin.status,403);
+  }finally{app.close();}
+});
+
+test('real Pages transport creates and rejoins a room with a hosted player, keeping hidden cards private',async()=>{
+  const app=setup();try{
+    const storageMap=new Map(),storage={getItem:k=>storageMap.get(k),setItem:(k,v)=>storageMap.set(k,v),removeItem:k=>storageMap.delete(k)};
+    const options={pageUrl:'https://iambelmo.github.io/DUKO/',apiOrigin:'https://duko.test',storage,clientId:randomUUID(),fetchImpl:async(url,init)=>{
+      assert.equal(init.credentials,'omit');
+      const result=await handleApi(new Request(url,{...init,headers:{...init.headers,Origin:'https://iambelmo.github.io'}}),app.db,app.time);
+      assert.equal(result.headers.get('Access-Control-Allow-Origin'),'https://iambelmo.github.io');return result;
+    }};
+    let pages=createApiClient(options);
+    const call=async(path,body)=>{const {response,data}=await pages.request(path,body);assert.equal(response.status,200,JSON.stringify(data));return data;};
+    const session=await call('/api/session',{name:'Pages player'});assert.equal('sessionToken'in session,false);
+    const {code}=await call('/api/rooms/create',{});
+    const hosted=await app.person('Hosted player');assert.equal((await hosted.post('/api/rooms/join',{code})).status,200);await hosted.connect();
+    await call('/api/connect',{clientId:options.clientId});
+    let view=(await call('/api/state')).view;
+    const send=async(type,fields={})=>{
+      const envelope={commandId:randomUUID(),roundId:view.roundId,command:{type,...(!['READY','START','BURN'].includes(type)?{actionId:view.private.actionId}:{}),...fields}};
+      const result=await call('/api/command',{envelope});assert.equal(result.receipt.ok,true,JSON.stringify(result.receipt));view=result.view;return result;
+    };
+    await send('READY',{ready:true});await hosted.send('READY',{ready:true});await send('START');
+    assert.equal(view.phase,'INITIAL_PEEK');
+    assert.deepEqual(view.players.find(p=>p.id===session.playerId).slots.map(s=>!!s.face),[false,false,true,true]);
+    assert.ok(view.players.filter(p=>p.id!==session.playerId).every(p=>p.slots.every(s=>s.face===null)));
+    app.advance(6001);view=(await call('/api/state')).view;await hosted.refresh();
+    if(view.turnPlayerId===session.playerId){await send('DRAW_FIRE');assert.ok(view.private.drawn);await hosted.refresh();assert.equal(hosted.view.private.drawn,null);await send('DISCARD_DRAWN');}
+    else{await hosted.send('DRAW_FIRE');view=(await call('/api/state')).view;assert.equal(view.private.drawn,null);await hosted.send('DISCARD_DRAWN');}
+    // Reload keeps the room session but takes a fresh per-tab connection lease.
+    const previousClient=options.clientId;options.clientId=randomUUID();pages=createApiClient(options);
+    const restored=await call('/api/me');assert.equal(restored.session.roomCode,code);
+    await call('/api/connect',{clientId:options.clientId});
+    const stale=createApiClient({...options,clientId:previousClient});
+    const old=await stale.request('/api/state');assert.equal(old.response.status,409);assert.equal(old.data.code,'SESSION_REPLACED');
+    await call('/api/rooms/leave',{});assert.equal((await call('/api/me')).session.roomCode,null);
+    assertInvariants(JSON.parse(app.sqlite.prepare('SELECT payload FROM duko_rooms WHERE code=?').get(code).payload).state);
   }finally{app.close();}
 });
